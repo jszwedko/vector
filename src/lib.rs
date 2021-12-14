@@ -14,6 +14,9 @@
 #![deny(clippy::missing_const_for_fn)] // [nursery] valuable to the optimizer,
                                        // but may produce false positives
 
+#[global_allocator]
+static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
 #[macro_use]
 extern crate tracing;
 #[macro_use]
