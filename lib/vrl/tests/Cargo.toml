@@ -9,6 +9,7 @@ publish = false
 parser = { package = "vrl-parser", path = "../parser" }
 shared = { path = "../../shared", default-features = false }
 enrichment = { path = "../../enrichment" }
+snmalloc-rs = { version = "0.2" }
 stdlib = { package = "vrl-stdlib", path = "../stdlib" }
 vrl = { path = "../core" }
 
