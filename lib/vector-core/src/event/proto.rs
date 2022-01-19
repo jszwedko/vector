@@ -9,7 +9,46 @@ include!(concat!(env!("OUT_DIR"), "/event.rs"));
 pub use event_wrapper::Event;
 pub use metric::Value as MetricValue;
 
-use super::metric::MetricSketch;
+use super::{array, metric::MetricSketch};
+
+impl From<array::LogArray> for event_array::Events {
+    fn from(logs: array::LogArray) -> Self {
+        let logs = logs.into_iter().map(Into::into).collect();
+        Self::Logs(LogArray { logs })
+    }
+}
+
+impl From<array::MetricArray> for event_array::Events {
+    fn from(metrics: array::MetricArray) -> Self {
+        let metrics = metrics.into_iter().map(Into::into).collect();
+        Self::Metrics(MetricArray { metrics })
+    }
+}
+
+impl From<array::EventArray> for EventArray {
+    fn from(events: array::EventArray) -> Self {
+        let events = Some(match events {
+            array::EventArray::Logs(logs) => logs.into(),
+            array::EventArray::Metrics(metrics) => metrics.into(),
+        });
+        Self { events }
+    }
+}
+
+impl From<EventArray> for array::EventArray {
+    fn from(events: EventArray) -> Self {
+        let events = events.events.unwrap();
+
+        match events {
+            event_array::Events::Logs(logs) => {
+                array::EventArray::Logs(logs.logs.into_iter().map(Into::into).collect())
+            }
+            event_array::Events::Metrics(metrics) => {
+                array::EventArray::Metrics(metrics.metrics.into_iter().map(Into::into).collect())
+            }
+        }
+    }
+}
 
 impl From<Event> for EventWrapper {
     fn from(event: Event) -> Self {
