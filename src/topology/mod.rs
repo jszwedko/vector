@@ -30,7 +30,7 @@ use vector_buffers::{
 
 use crate::{
     config::{ComponentKey, Config, ConfigDiff, OutputId},
-    event::Event,
+    event::EventArray,
     topology::{
         builder::Pieces,
         task::{Task, TaskOutput},
@@ -40,8 +40,8 @@ use crate::{
 type TaskHandle = tokio::task::JoinHandle<Result<TaskOutput, ()>>;
 
 type BuiltBuffer = (
-    BufferSender<Event>,
-    Arc<Mutex<Option<BufferReceiver<Event>>>>,
+    BufferSender<EventArray>,
+    Arc<Mutex<Option<BufferReceiver<EventArray>>>>,
     Acker,
 );
 

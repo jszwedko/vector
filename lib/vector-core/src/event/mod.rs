@@ -391,6 +391,32 @@ pub enum EventRef<'a> {
     Metric(&'a Metric),
 }
 
+impl<'a> EventRef<'a> {
+    /// Convert this reference into a new `LogEvent` by cloning.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if this is not a `LogEvent` reference.
+    pub fn into_log(self) -> LogEvent {
+        match self {
+            Self::Log(log) => log.clone(),
+            _ => panic!("Failed type coercion, {:?} is not a log reference", self),
+        }
+    }
+
+    /// Convert this reference into a new `Metric` by cloning.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if this is not a `Metric` reference.
+    pub fn into_metric(self) -> Metric {
+        match self {
+            Self::Metric(metric) => metric.clone(),
+            _ => panic!("Failed type coercion, {:?} is not a metric reference", self),
+        }
+    }
+}
+
 impl<'a> From<&'a Event> for EventRef<'a> {
     fn from(event: &'a Event) -> Self {
         match event {
@@ -409,6 +435,16 @@ impl<'a> From<&'a LogEvent> for EventRef<'a> {
 impl<'a> From<&'a Metric> for EventRef<'a> {
     fn from(metric: &'a Metric) -> Self {
         Self::Metric(metric)
+    }
+}
+
+impl<'a> EventDataEq<Event> for EventRef<'a> {
+    fn event_data_eq(&self, that: &Event) -> bool {
+        match (self, that) {
+            (Self::Log(a), Event::Log(b)) => a.event_data_eq(b),
+            (Self::Metric(a), Event::Metric(b)) => a.event_data_eq(b),
+            _ => false,
+        }
     }
 }
 

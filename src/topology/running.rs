@@ -13,7 +13,7 @@ use vector_buffers::topology::channel::BufferSender;
 
 use crate::{
     config::{ComponentKey, Config, ConfigDiff, HealthcheckOptions, OutputId, Resource},
-    event::Event,
+    event::EventArray,
     shutdown::SourceShutdownCoordinator,
     topology::{
         build_or_log_errors, builder,
@@ -28,7 +28,7 @@ use crate::{
 
 #[allow(dead_code)]
 pub struct RunningTopology {
-    inputs: HashMap<ComponentKey, BufferSender<Event>>,
+    inputs: HashMap<ComponentKey, BufferSender<EventArray>>,
     outputs: HashMap<OutputId, ControlChannel>,
     source_tasks: HashMap<ComponentKey, TaskHandle>,
     tasks: HashMap<ComponentKey, TaskHandle>,
@@ -409,7 +409,7 @@ impl RunningTopology {
         }
 
         // Cleanup changed and collect buffers to be reused
-        let mut buffers = HashMap::new();
+        let mut buffers = HashMap::<ComponentKey, BuiltBuffer>::new();
         for key in &diff.sinks.to_change {
             if wait_for_sinks.contains(key) {
                 let previous = self.tasks.remove(key).unwrap();

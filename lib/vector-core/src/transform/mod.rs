@@ -6,7 +6,7 @@ use vector_common::EventDataEq;
 
 use crate::{
     config::Output,
-    event::{Event, EventArray, EventContainer},
+    event::{Event, EventArray, EventContainer, EventRef},
     fanout::{self, Fanout},
     ByteSizeOf,
 };
@@ -141,6 +141,23 @@ impl Transform {
 ///   `TaskTransform` or vice versa.
 pub trait FunctionTransform: Send + dyn_clone::DynClone + Sync {
     fn transform(&mut self, output: &mut OutputBuffer, event: Event);
+
+    /// TODO
+    fn transform_test(&mut self, event: Event) -> Vec<Event> {
+        let mut buf = OutputBuffer::with_capacity(1);
+        self.transform(&mut buf, event);
+        buf.into_events().collect()
+    }
+
+    /// TODO
+    fn transform_test_one(&mut self, event: Event) -> Event {
+        let result = self.transform_test(event);
+        assert!(
+            result.len() <= 1,
+            "Transform resulted in more than one output event."
+        );
+        result.into_iter().next().unwrap()
+    }
 }
 
 dyn_clone::clone_trait_object!(FunctionTransform);
@@ -182,6 +199,14 @@ pub trait TaskTransform<T: EventContainer + 'static>: Send + 'static {
 /// considered a bug and will cause a panic.
 pub trait SyncTransform: Send + dyn_clone::DynClone + Sync {
     fn transform(&mut self, event: Event, output: &mut TransformOutputsBuf);
+
+    fn transform_all(&mut self, events: Vec<EventArray>, output: &mut TransformOutputsBuf) {
+        for array in events {
+            for event in array.into_events() {
+                self.transform(event, output);
+            }
+        }
+    }
 }
 
 dyn_clone::clone_trait_object!(SyncTransform);
@@ -334,14 +359,14 @@ impl TransformOutputsBuf {
             .append(slice);
     }
 
-    pub fn drain(&mut self) -> impl Iterator<Item = Event> + '_ {
+    pub fn drain(&mut self) -> impl Iterator<Item = EventArray> + '_ {
         self.primary_buffer
             .as_mut()
             .expect("no default output")
             .drain()
     }
 
-    pub fn drain_named(&mut self, name: &str) -> impl Iterator<Item = Event> + '_ {
+    pub fn drain_named(&mut self, name: &str) -> impl Iterator<Item = EventArray> + '_ {
         self.named_buffers
             .get_mut(name)
             .expect("unknown output")
@@ -382,7 +407,7 @@ impl ByteSizeOf for TransformOutputsBuf {
 }
 
 #[derive(Debug, Default)]
-pub struct OutputBuffer(Vec<Event>);
+pub struct OutputBuffer(Vec<EventArray>);
 
 impl OutputBuffer {
     pub fn with_capacity(capacity: usize) -> Self {
@@ -390,19 +415,39 @@ impl OutputBuffer {
     }
 
     pub fn push(&mut self, event: Event) {
-        self.0.push(event);
+        // Coalesce multiple pushes of the same type into one array.
+        match (event, self.0.last_mut()) {
+            (Event::Log(log), Some(EventArray::Logs(logs))) => {
+                logs.push(log);
+            }
+            (Event::Metric(metric), Some(EventArray::Metrics(metrics))) => {
+                metrics.push(metric);
+            }
+            (event, _) => {
+                self.0.push(event.into());
+            }
+        }
     }
 
     pub fn append(&mut self, events: &mut Vec<Event>) {
-        self.0.append(events);
+        for event in events.drain(..) {
+            self.push(event);
+        }
     }
 
     pub fn extend(&mut self, events: impl Iterator<Item = Event>) {
-        self.0.extend(events);
+        for event in events {
+            self.push(event);
+        }
     }
 
     pub fn pop(&mut self) -> Option<Event> {
-        self.0.pop()
+        let result = self.0.last_mut().and_then(EventArray::pop);
+        // Make sure to clean up empty arrays
+        if self.0.last().map_or(false, EventArray::is_empty) {
+            self.0.pop();
+        }
+        result
     }
 
     pub fn is_empty(&self) -> bool {
@@ -410,26 +455,33 @@ impl OutputBuffer {
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.0.iter().map(EventArray::len).sum()
     }
 
-    pub fn first(&self) -> Option<&Event> {
-        self.0.first()
+    pub fn first(&self) -> Option<EventRef> {
+        self.0.first().and_then(|first| match first {
+            EventArray::Logs(l) => l.first().map(Into::into),
+            EventArray::Metrics(m) => m.first().map(Into::into),
+        })
     }
 
-    fn drain(&mut self) -> impl Iterator<Item = Event> + '_ {
+    fn drain(&mut self) -> impl Iterator<Item = EventArray> + '_ {
         self.0.drain(..)
     }
 
     async fn send(&mut self, output: &mut Fanout) {
-        for event in self.0.drain(..) {
-            output.feed(event).await.expect("unit error");
+        for array in self.0.drain(..) {
+            output.feed(array).await.expect("unit error");
         }
         output.flush().await.expect("unit error");
     }
 
+    fn iter_events(&self) -> impl Iterator<Item = EventRef> {
+        self.0.iter().flat_map(EventArray::iter_events)
+    }
+
     pub fn into_events(self) -> impl Iterator<Item = Event> {
-        self.0.into_iter()
+        self.0.into_iter().flat_map(EventArray::into_events)
     }
 }
 
@@ -441,7 +493,15 @@ impl ByteSizeOf for OutputBuffer {
 
 impl EventDataEq<Vec<Event>> for OutputBuffer {
     fn event_data_eq(&self, other: &Vec<Event>) -> bool {
-        self.0.as_slice().event_data_eq(&other.as_slice())
+        struct Comparator<'a>(EventRef<'a>);
+
+        impl<'a> PartialEq<&Event> for Comparator<'a> {
+            fn eq(&self, that: &&Event) -> bool {
+                self.0.event_data_eq(that)
+            }
+        }
+
+        self.iter_events().map(Comparator).eq(other.iter())
     }
 }
 
