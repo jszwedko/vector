@@ -392,6 +392,18 @@ pub enum EventRef<'a> {
 }
 
 impl<'a> EventRef<'a> {
+    /// Extract the `LogEvent` reference in this.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if this is not a `LogEvent` reference.
+    pub fn as_log(self) -> &'a LogEvent {
+        match self {
+            Self::Log(log) => log,
+            _ => panic!("Failed type coercion, {:?} is not a log reference", self),
+        }
+    }
+
     /// Convert this reference into a new `LogEvent` by cloning.
     ///
     /// # Panics
@@ -401,6 +413,18 @@ impl<'a> EventRef<'a> {
         match self {
             Self::Log(log) => log.clone(),
             _ => panic!("Failed type coercion, {:?} is not a log reference", self),
+        }
+    }
+
+    /// Extract the `Metric` reference in this.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if this is not a `Metric` reference.
+    pub fn as_metric(self) -> &'a Metric {
+        match self {
+            Self::Metric(metric) => metric,
+            _ => panic!("Failed type coercion, {:?} is not a metric reference", self),
         }
     }
 
