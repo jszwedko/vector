@@ -141,23 +141,6 @@ impl Transform {
 ///   `TaskTransform` or vice versa.
 pub trait FunctionTransform: Send + dyn_clone::DynClone + Sync {
     fn transform(&mut self, output: &mut OutputBuffer, event: Event);
-
-    /// TODO
-    fn transform_test(&mut self, event: Event) -> Vec<Event> {
-        let mut buf = OutputBuffer::with_capacity(1);
-        self.transform(&mut buf, event);
-        buf.into_events().collect()
-    }
-
-    /// TODO
-    fn transform_test_one(&mut self, event: Event) -> Event {
-        let result = self.transform_test(event);
-        assert!(
-            result.len() <= 1,
-            "Transform resulted in more than one output event."
-        );
-        result.into_iter().next().unwrap()
-    }
 }
 
 dyn_clone::clone_trait_object!(FunctionTransform);
