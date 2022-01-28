@@ -141,7 +141,7 @@ impl EventArray {
         }
     }
 
-    /// Iterate over this array's events
+    /// Iterate over this array's events.
     pub fn iter_events(&self) -> impl Iterator<Item = EventRef> {
         match self {
             Self::Logs(array) => EventArrayIter::Logs(array.iter()),
