@@ -790,24 +790,24 @@ mod tests {
         assert_eq!(
             output[0].as_metric(),
             &Metric::new_with_metadata(
-                "xyz_exception_total",
-                MetricKind::Incremental,
-                MetricValue::Counter { value: 1.0 },
-                metadata.clone(),
-            )
-            .with_namespace(Some("local"))
-            .with_timestamp(Some(ts()))
-        );
-        assert_eq!(
-            output[1].as_metric(),
-            &Metric::new_with_metadata(
                 "local_abc_status_set",
                 MetricKind::Incremental,
                 MetricValue::Set {
                     values: vec!["42".into()].into_iter().collect()
                 },
+                metadata.clone(),
+            )
+            .with_timestamp(Some(ts()))
+        );
+        assert_eq!(
+            output[1].as_metric(),
+            &Metric::new_with_metadata(
+                "xyz_exception_total",
+                MetricKind::Incremental,
+                MetricValue::Counter { value: 1.0 },
                 metadata,
             )
+            .with_namespace(Some("local"))
             .with_timestamp(Some(ts()))
         );
     }
