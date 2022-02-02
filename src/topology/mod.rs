@@ -8,6 +8,7 @@
 
 pub mod builder;
 pub use vector_core::fanout;
+pub(self) mod ready_events;
 mod running;
 mod task;
 
