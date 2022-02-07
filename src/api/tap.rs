@@ -52,6 +52,7 @@ pub enum TapNotification {
 pub enum TapPayload {
     Log(OutputId, LogEvent),
     Metric(OutputId, Metric),
+    Trace(OutputId, LogEvent),
     Notification(String, TapNotification),
 }
 
@@ -94,6 +95,7 @@ impl Sink<Event> for TapSink {
         let payload = match event {
             Event::Log(log) => TapPayload::Log(self.output_id.clone(), log),
             Event::Metric(metric) => TapPayload::Metric(self.output_id.clone(), metric),
+            Event::Trace(trace) => TapPayload::Log(self.output_id.clone(), trace),
         };
 
         if let Err(TrySendError::Closed(payload)) = self.tap_tx.try_send(payload) {

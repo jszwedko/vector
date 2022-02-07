@@ -36,6 +36,7 @@ impl From<TapPayload> for OutputEventsPayload {
                     EventNotificationType::NotMatched,
                 )),
             },
+            TapPayload::Trace(_, _) => todo!(),
         }
     }
 }
