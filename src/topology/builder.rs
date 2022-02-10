@@ -5,7 +5,7 @@ use std::{
     time::Instant,
 };
 
-use futures::{stream::FuturesOrdered, FutureExt, StreamExt, TryFutureExt};
+use futures::{stream::FuturesOrdered, FutureExt, StreamExt};
 use once_cell::sync::Lazy;
 use stream_cancel::{StreamExt as StreamCancelExt, Trigger, Tripwire};
 use tokio::{
@@ -155,9 +155,9 @@ pub async fn build_pieces(
         for output in source_outputs {
             let rx = builder.add_output(output.clone());
 
-            let (fanout, control) = Fanout::new();
+            let (mut fanout, control) = Fanout::new();
             let pump = async move {
-                rx.map(Ok).forward(fanout).await?;
+                fanout.send_stream(rx).await;
                 Ok(TaskOutput::Source)
             };
 
@@ -661,7 +661,7 @@ fn build_task_transform(
     typetag: &str,
     key: &ComponentKey,
 ) -> (Task, HashMap<OutputId, fanout::ControlChannel>) {
-    let (fanout, control) = Fanout::new();
+    let (mut fanout, control) = Fanout::new();
 
     let input_rx = crate::utilization::wrap(input_rx);
 
@@ -674,7 +674,7 @@ fn build_task_transform(
                 byte_size: events.size_of(),
             })
         });
-    let transform = t
+    let stream = t
         .transform(Box::pin(filtered))
         .flat_map(|events| futures::stream::iter(events.into_events()))
         .inspect(|event: &Event| {
@@ -683,14 +683,13 @@ fn build_task_transform(
                 byte_size: event.size_of(),
                 output: None,
             });
-        })
-        .map(Ok)
-        .forward(fanout)
-        .boxed()
-        .map_ok(|_| {
-            debug!("Finished.");
-            TaskOutput::Transform
         });
+    let transform = async move {
+        fanout.send_stream(stream).await;
+        debug!("Finished.");
+        Ok(TaskOutput::Transform)
+    }
+    .boxed();
 
     let mut outputs = HashMap::new();
     outputs.insert(OutputId::from(key), control);

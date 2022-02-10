@@ -71,6 +71,13 @@ where
             Self::Opaque(_) => None,
         }
     }
+
+    pub fn try_send(&self, item: T) -> Result<(), T> {
+        match self {
+            Self::Channel(tx) => tx.try_send(item),
+            Self::Opaque(_) => todo!("figure this out later"),
+        }
+    }
 }
 
 impl<T> Clone for SenderAdapter<T> {
@@ -217,6 +224,10 @@ impl<T: Bufferable> BufferSender<T> {
     #[cfg(test)]
     pub(crate) fn get_overflow_ref(&self) -> Option<&BufferSender<T>> {
         self.overflow.as_ref().map(AsRef::as_ref)
+    }
+
+    pub fn try_send(&self, item: T) -> Result<(), T> {
+        self.base.try_send(item)
     }
 }
 

@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use tokio::sync::mpsc::{OwnedPermit, Sender};
+use tokio::sync::mpsc::{error::TrySendError, OwnedPermit, Sender};
 use tokio_util::sync::ReusableBoxFuture;
 
 // NOTE: `PollSender<T>` has been directly vendored here via copy/paste due to issues with
@@ -243,6 +243,20 @@ impl<T: Send + 'static> PollSender<T> {
 
         self.state = next_state;
         result
+    }
+
+    pub fn try_send(&self, item: T) -> Result<(), T> {
+        if self.is_closed() {
+            Err(item)
+        } else {
+            self.sender
+                .as_ref()
+                .expect("not closed")
+                .try_send(item)
+                .map_err(|e| match e {
+                    TrySendError::Full(e) | TrySendError::Closed(e) => e,
+                })
+        }
     }
 }
 

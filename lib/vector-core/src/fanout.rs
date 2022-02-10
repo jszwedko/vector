@@ -1,20 +1,17 @@
 use crate::{config::ComponentKey, event::Event};
-use futures::Sink;
-use futures_util::SinkExt;
+use futures::Stream;
 use std::{
     fmt,
-    pin::Pin,
     task::{Context, Poll},
 };
 use tokio::sync::mpsc;
-
-type GenericEventSink = Pin<Box<dyn Sink<Event, Error = ()> + Send>>;
+use vector_buffers::topology::channel::BufferSender;
 
 pub enum ControlMessage {
-    Add(ComponentKey, GenericEventSink),
+    Add(ComponentKey, BufferSender<Event>),
     Remove(ComponentKey),
     /// Will stop accepting events until Some with given id is replaced.
-    Replace(ComponentKey, Option<GenericEventSink>),
+    Replace(ComponentKey, Option<BufferSender<Event>>),
 }
 
 impl fmt::Debug for ControlMessage {
@@ -31,7 +28,7 @@ impl fmt::Debug for ControlMessage {
 pub type ControlChannel = mpsc::UnboundedSender<ControlMessage>;
 
 pub struct Fanout {
-    sinks: Vec<(ComponentKey, Option<GenericEventSink>)>,
+    sinks: Vec<(ComponentKey, Option<BufferSender<Event>>)>,
     i: usize,
     control_channel: mpsc::UnboundedReceiver<ControlMessage>,
 }
@@ -54,7 +51,7 @@ impl Fanout {
     /// # Panics
     ///
     /// Function will panic if a sink with the same ID is already present.
-    pub fn add(&mut self, id: ComponentKey, sink: GenericEventSink) {
+    pub fn add(&mut self, id: ComponentKey, sink: BufferSender<Event>) {
         assert!(
             !self.sinks.iter().any(|(n, _)| n == &id),
             "Duplicate output id in fanout"
@@ -67,18 +64,14 @@ impl Fanout {
         let i = self.sinks.iter().position(|(n, _)| n == id);
         let i = i.expect("Didn't find output in fanout");
 
-        let (_id, removed) = self.sinks.remove(i);
-
-        if let Some(mut removed) = removed {
-            tokio::spawn(async move { removed.close().await });
-        }
+        let (_id, _removed) = self.sinks.remove(i);
 
         if self.i > i {
             self.i -= 1;
         }
     }
 
-    fn replace(&mut self, id: &ComponentKey, sink: Option<GenericEventSink>) {
+    fn replace(&mut self, id: &ComponentKey, sink: Option<BufferSender<Event>>) {
         if let Some((_, existing)) = self.sinks.iter_mut().find(|(n, _)| n == id) {
             *existing = sink;
         } else {
@@ -96,114 +89,24 @@ impl Fanout {
         }
     }
 
-    #[inline]
-    fn handle_sink_error(&mut self, index: usize) -> Result<(), ()> {
-        // If there's only one sink, propagate the error to the source ASAP
-        // so it stops reading from its input. If there are multiple sinks,
-        // keep pushing to the non-errored ones (while the errored sink
-        // triggers a more graceful shutdown).
-        if self.sinks.len() == 1 {
-            Err(())
-        } else {
-            self.sinks.remove(index);
-            Ok(())
+    pub async fn send_stream(&mut self, _events: impl Stream<Item = Event>) {
+        for (_id, _sink) in &self.sinks {
+            todo!();
         }
     }
 
-    fn poll_sinks<F>(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        poll: F,
-    ) -> Poll<Result<(), ()>>
-    where
-        F: Fn(
-            Pin<&mut (dyn Sink<Event, Error = ()> + Send)>,
-            &mut Context<'_>,
-        ) -> Poll<Result<(), ()>>,
-    {
-        self.process_control_messages(cx);
-
-        let mut poll_result = Poll::Ready(Ok(()));
-
-        let mut i = 0;
-        while let Some((_, sink)) = self.sinks.get_mut(i) {
-            if let Some(sink) = sink {
-                match poll(sink.as_mut(), cx) {
-                    Poll::Pending => poll_result = Poll::Pending,
-                    Poll::Ready(Ok(())) => (),
-                    Poll::Ready(Err(())) => {
-                        self.handle_sink_error(i)?;
-                        continue;
-                    }
-                }
-            }
-            i += 1;
+    pub async fn send_all(&mut self, _events: Vec<Event>) {
+        for (_id, _sink) in &self.sinks {
+            todo!();
         }
-
-        poll_result
-    }
-}
-
-impl Sink<Event> for Fanout {
-    type Error = ();
-
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
-        let this = self.get_mut();
-
-        this.process_control_messages(cx);
-
-        while let Some((_, sink)) = this.sinks.get_mut(this.i) {
-            match sink {
-                Some(sink) => match sink.as_mut().poll_ready(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(())) => this.i += 1,
-                    Poll::Ready(Err(())) => this.handle_sink_error(this.i)?,
-                },
-                // process_control_messages ended because control channel returned
-                // Pending so it's fine to return Pending here since the control
-                // channel will notify current task when it receives a message.
-                None => return Poll::Pending,
-            }
-        }
-
-        this.i = 0;
-
-        Poll::Ready(Ok(()))
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: Event) -> Result<(), ()> {
-        let mut items = vec![item; self.sinks.len()];
-
-        let mut i = 1;
-        while let Some((_, sink)) = self.sinks.get_mut(i) {
-            if let Some(sink) = sink.as_mut() {
-                let item = items.pop().unwrap();
-                if sink.as_mut().start_send(item).is_err() {
-                    self.handle_sink_error(i)?;
-                    continue;
-                }
-            }
-            i += 1;
+    // TODO: real error
+    #[cfg(test)]
+    pub async fn send(&mut self, event: Event) {
+        for (_id, sink) in &self.sinks {
+            todo!();
         }
-
-        if let Some((_, sink)) = self.sinks.first_mut() {
-            if let Some(sink) = sink.as_mut() {
-                let item = items.pop().unwrap();
-                if sink.as_mut().start_send(item).is_err() {
-                    self.handle_sink_error(0)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
-        self.poll_sinks(cx, |sink, cx| sink.poll_flush(cx))
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
-        self.poll_sinks(cx, |sink, cx| sink.poll_close(cx))
     }
 }
 
@@ -215,7 +118,7 @@ mod tests {
         task::{Context, Poll},
     };
 
-    use futures::{stream, Sink, SinkExt, StreamExt};
+    use futures::{Sink, SinkExt, StreamExt};
     use tokio::sync::mpsc::UnboundedSender;
     use tokio_test::{assert_pending, assert_ready, task::spawn};
     use vector_buffers::{
@@ -255,7 +158,7 @@ mod tests {
 
         let mut receivers = Vec::new();
         for (i, (sender, receiver)) in pairs.into_iter().enumerate() {
-            fanout.add(ComponentKey::from(i.to_string()), Box::pin(sender));
+            fanout.add(ComponentKey::from(i.to_string()), sender);
             receivers.push(receiver);
         }
 
@@ -271,7 +174,7 @@ mod tests {
         let (sender, receiver) = build_sender_pair(capacity).await;
         receivers.push(receiver);
 
-        fanout.add(ComponentKey::from(sender_id.to_string()), Box::pin(sender));
+        fanout.add(ComponentKey::from(sender_id.to_string()), sender);
     }
 
     fn remove_sender_from_fanout(control: &UnboundedSender<ControlMessage>, sender_id: usize) {
@@ -294,7 +197,7 @@ mod tests {
         control
             .send(ControlMessage::Replace(
                 ComponentKey::from(sender_id.to_string()),
-                Some(Box::pin(sender)),
+                Some(sender),
             ))
             .expect("sending control message should not fail");
 
@@ -328,7 +231,7 @@ mod tests {
         control
             .send(ControlMessage::Replace(
                 ComponentKey::from(sender_id.to_string()),
-                Some(Box::pin(sender)),
+                Some(sender),
             ))
             .expect("sending control message should not fail");
     }
@@ -338,11 +241,8 @@ mod tests {
         let (fanout, _, receivers) = fanout_from_senders(&[2, 2]).await;
         let events = make_events(2);
 
-        stream::iter(events.clone())
-            .map(Ok)
-            .forward(fanout)
-            .await
-            .expect("forward should not fail");
+        let clones = events.clone();
+        fanout.send_all(clones).await;
 
         for receiver in receivers {
             assert_eq!(collect_ready(receiver), events);
@@ -386,23 +286,14 @@ mod tests {
         let events = make_events(3);
 
         // Send in the first two events to our initial two senders:
-        fanout
-            .send(events[0].clone())
-            .await
-            .expect("send should not fail");
-        fanout
-            .send(events[1].clone())
-            .await
-            .expect("send should not fail");
+        fanout.send(events[0].clone()).await;
+        fanout.send(events[1].clone()).await;
 
         // Now add a third sender:
         add_sender_to_fanout(&mut fanout, &mut receivers, 2, 4).await;
 
         // Send in the last event which all three senders will now get:
-        fanout
-            .send(events[2].clone())
-            .await
-            .expect("send should not fail");
+        fanout.send(events[2].clone()).await;
 
         // Make sure the first two senders got all three events, but the third sender only got the
         // last event:
@@ -418,23 +309,14 @@ mod tests {
         let events = make_events(3);
 
         // Send in the first two events to our initial two senders:
-        fanout
-            .send(events[0].clone())
-            .await
-            .expect("send should not fail");
-        fanout
-            .send(events[1].clone())
-            .await
-            .expect("send should not fail");
+        fanout.send(events[0].clone()).await;
+        fanout.send(events[1].clone()).await;
 
         // Now remove the second sender:
         remove_sender_from_fanout(&control, 1);
 
         // Send in the last event which only the first sender will get:
-        fanout
-            .send(events[2].clone())
-            .await
-            .expect("send should not fail");
+        fanout.send(events[2].clone()).await;
 
         // Make sure the first sender got all three events, but the second sender only got the first two:
         let expected_events = [&events, &events[..2]];
@@ -495,14 +377,8 @@ mod tests {
         let (mut fanout, _) = Fanout::new();
         let events = make_events(2);
 
-        fanout
-            .send(events[0].clone())
-            .await
-            .expect("send should not fail");
-        fanout
-            .send(events[1].clone())
-            .await
-            .expect("send should not fail");
+        fanout.send(events[0].clone()).await;
+        fanout.send(events[1].clone()).await;
     }
 
     #[tokio::test]
@@ -511,23 +387,14 @@ mod tests {
         let events = make_events(3);
 
         // First two sends should immediately complete because all senders have capacity:
-        fanout
-            .send(events[0].clone())
-            .await
-            .expect("send should not fail");
-        fanout
-            .send(events[1].clone())
-            .await
-            .expect("send should not fail");
+        fanout.send(events[0].clone()).await;
+        fanout.send(events[1].clone()).await;
 
         // Replace the first sender with a brand new one before polling again:
         let old_first_receiver = replace_sender_in_fanout(&control, &mut receivers, 0, 4).await;
 
         // And do the third send which should also complete since all senders still have capacity:
-        fanout
-            .send(events[2].clone())
-            .await
-            .expect("send should not fail");
+        fanout.send(events[2].clone()).await;
 
         // Now make sure that the new "first" sender only got the third event, but that the second and
         // third sender got all three events:
@@ -546,14 +413,8 @@ mod tests {
         let events = make_events(3);
 
         // First two sends should immediately complete because all senders have capacity:
-        fanout
-            .send(events[0].clone())
-            .await
-            .expect("send should not fail");
-        fanout
-            .send(events[1].clone())
-            .await
-            .expect("send should not fail");
+        fanout.send(events[0].clone()).await;
+        fanout.send(events[1].clone()).await;
 
         // Now do an empty replace on the second sender, which we'll test to make sure that `Fanout`
         // doesn't let any writes through until we replace it properly.  We get back the receiver
@@ -570,7 +431,6 @@ mod tests {
         finish_sender_replace(&control, 0, new_first_sender);
         assert!(third_send.is_woken());
         let third_send_result = assert_ready!(third_send.poll());
-        assert!(third_send_result.is_ok());
 
         // Make sure the original first sender got the first two events, the new first sender got
         // the last event, and the second sender got all three:
@@ -637,13 +497,14 @@ mod tests {
                 receivers.push(rx);
                 tx
             };
-            fanout.add(id, Box::pin(tx));
+            fanout.add(id, tx);
         }
 
         // Spawn a task to send the events into the `Fanout`.  We spawn a task so that we can await
         // the receivers while the forward task drives itself to completion:
         let events = make_events(3);
-        let send = stream::iter(events.clone()).map(Ok).forward(fanout);
+        let events_clone = events.clone();
+        let send = async move { fanout.send_all(events_clone).await };
         tokio::spawn(send);
 
         // Wait for all of our receivers for non-erroring-senders to complete, and make sure they

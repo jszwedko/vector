@@ -13,6 +13,10 @@ use tokio::sync::{
     oneshot,
 };
 use uuid::Uuid;
+use vector_buffers::{
+    topology::channel::{BufferSender, SenderAdapter},
+    WhenFull,
+};
 use vector_core::event::Metric;
 
 use super::{ShutdownRx, ShutdownTx};
@@ -70,6 +74,7 @@ impl TapPayload {
 
 /// A `TapSink` is used as an output channel for a topology component, and receives
 /// `Event`s. If these are of type `Event::LogEvent`, they are relayed to the tap client.
+#[derive(Clone)]
 pub struct TapSink {
     tap_tx: TapSender,
     output_id: OutputId,
@@ -226,10 +231,13 @@ async fn tap_handler(
                             // getting involved in config diffing at this point.
                             let sink_id = Uuid::new_v4().to_string();
                             let sink = TapSink::new(tx.clone(), output_id.clone());
+                            // TODO: it is a channel internally, just need to dig it out
+                            let sink = SenderAdapter::opaque(sink);
+                            let sink = BufferSender::new(sink, WhenFull::DropNewest);
 
                             // Attempt to connect the sink.
                             match control_tx
-                                .send(fanout::ControlMessage::Add(ComponentKey::from(sink_id.as_str()), Box::pin(sink)))
+                                .send(fanout::ControlMessage::Add(ComponentKey::from(sink_id.as_str()), sink))
                             {
                                 Ok(_) => {
                                     debug!(
