@@ -103,8 +103,8 @@ impl Fanout {
 
     // TODO: real error
     #[cfg(test)]
-    pub async fn send(&mut self, event: Event) {
-        for (_id, sink) in &self.sinks {
+    pub async fn send(&mut self, _event: Event) {
+        for (_id, _sink) in &self.sinks {
             todo!();
         }
     }
@@ -238,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn fanout_writes_to_all() {
-        let (fanout, _, receivers) = fanout_from_senders(&[2, 2]).await;
+        let (mut fanout, _, receivers) = fanout_from_senders(&[2, 2]).await;
         let events = make_events(2);
 
         let clones = events.clone();
@@ -256,8 +256,7 @@ mod tests {
 
         // First send should immediately complete because all senders have capacity:
         let mut first_send = spawn(async { fanout.send(events[0].clone()).await });
-        let first_send_result = assert_ready!(first_send.poll());
-        assert!(first_send_result.is_ok());
+        assert_ready!(first_send.poll());
         drop(first_send);
 
         // Second send should return pending because sender B is now full:
@@ -270,8 +269,7 @@ mod tests {
         }
 
         // Now our second send should actually be able to complete:
-        let second_send_result = assert_ready!(second_send.poll());
-        assert!(second_send_result.is_ok());
+        assert_ready!(second_send.poll());
         drop(second_send);
 
         // And make sure the second item comes through:
@@ -337,8 +335,7 @@ mod tests {
 
             // First send should immediately complete because all senders have capacity:
             let mut first_send = spawn(async { fanout.send(events[0].clone()).await });
-            let first_send_result = assert_ready!(first_send.poll());
-            assert!(first_send_result.is_ok());
+            assert_ready!(first_send.poll());
             drop(first_send);
 
             // Second send should return pending because sender B is now full:
@@ -356,7 +353,6 @@ mod tests {
             // Now our second send should actually be able to complete.  We'll assert that whichever
             // sender we removed does not get the next event:
             let second_send_result = assert_ready!(second_send.poll());
-            assert!(second_send_result.is_ok());
             drop(second_send);
 
             let mut expected_next = [
