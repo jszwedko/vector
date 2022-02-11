@@ -1,6 +1,8 @@
 use crate::{config::ComponentKey, event::Event};
-use futures::Stream;
+use futures::{stream, SinkExt, Stream, StreamExt};
+use futures_util::stream::FuturesUnordered;
 use std::{
+    collections::HashMap,
     fmt,
     task::{Context, Poll},
 };
@@ -89,20 +91,66 @@ impl Fanout {
         }
     }
 
-    pub async fn send_stream(&mut self, _events: impl Stream<Item = Event>) {
-        for (_id, _sink) in &self.sinks {
-            todo!();
+    pub async fn send_stream(&mut self, events: impl Stream<Item = Event>) {
+        let stream = events.ready_chunks(1024);
+        tokio::pin!(stream);
+        while let Some(events) = stream.next().await {
+            self.send_all(events).await;
         }
     }
 
-    pub async fn send_all(&mut self, _events: Vec<Event>) {
-        for (_id, _sink) in &self.sinks {
-            todo!();
+    pub async fn send_all(&mut self, events: Vec<Event>) {
+        let count = self.sinks.iter().filter(|x| x.1.is_some()).count();
+        if count == 0 {
+            // ???
+            return;
+        }
+        let mut clone_army: Vec<Vec<Event>> = Vec::with_capacity(count);
+        for _ in 0..(count - 1) {
+            clone_army.push(events.clone());
+        }
+        clone_army.push(events);
+
+        let sinks = self
+            .sinks
+            .iter_mut()
+            .filter_map(|(id, maybe_sink)| maybe_sink.as_mut().map(|sink| (id, sink)))
+            .zip(clone_army);
+
+        let mut jobs = FuturesUnordered::new();
+        let mut handles = HashMap::new();
+
+        for ((id, sink), events) in sinks {
+            let mut blocked = None;
+            let mut drain = events.into_iter();
+            while let Some(event) = drain.next() {
+                if let Err(event) = sink.try_send(event) {
+                    blocked = Some(event);
+                    break;
+                }
+            }
+            if let Some(event) = blocked {
+                let (job, handle) = futures::future::abortable(async move {
+                    sink.send(event).await.expect("unit error");
+                    sink.send_all(&mut stream::iter(drain).map(Ok))
+                        .await
+                        .expect("unit error");
+                });
+                jobs.push(job);
+                handles.insert(id, handle);
+            }
+        }
+
+        loop {
+            tokio::select! {
+                _ = jobs.next() => {
+                    if jobs.is_empty() { break }
+                }
+                // how would we replace a sink without dropping events in this setup??
+            }
         }
     }
 
-    // TODO: real error
-    #[cfg(test)]
     pub async fn send(&mut self, _event: Event) {
         for (_id, _sink) in &self.sinks {
             todo!();
