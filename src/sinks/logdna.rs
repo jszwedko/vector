@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 
+use bytes::Bytes;
 use futures::{FutureExt, SinkExt};
 use http::{Request, StatusCode, Uri};
 use once_cell::sync::Lazy;
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    config::{DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
+    config::{GenerateConfig, Input, SinkConfig, SinkContext, SinkDescription},
     event::Event,
     http::{Auth, HttpClient},
     sinks::util::{
@@ -99,8 +100,8 @@ impl SinkConfig for LogdnaConfig {
         Ok((super::VectorSink::from_event_sink(sink), healthcheck))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Log
+    fn input(&self) -> Input {
+        Input::log()
     }
 
     fn sink_type(&self) -> &'static str {
@@ -180,7 +181,7 @@ impl HttpSink for LogdnaConfig {
         Some(PartitionInnerBuffer::new(map.into(), key))
     }
 
-    async fn build_request(&self, output: Self::Output) -> crate::Result<http::Request<Vec<u8>>> {
+    async fn build_request(&self, output: Self::Output) -> crate::Result<http::Request<Bytes>> {
         let (events, key) = output.into_parts();
         let mut query = url::form_urlencoded::Serializer::new(String::new());
 
@@ -207,10 +208,11 @@ impl HttpSink for LogdnaConfig {
 
         let query = query.finish();
 
-        let body = serde_json::to_vec(&json!({
+        let body = crate::serde::json::to_bytes(&json!({
             "lines": events,
         }))
-        .unwrap();
+        .unwrap()
+        .freeze();
 
         let uri = self.build_uri(&query);
 
