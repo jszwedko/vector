@@ -56,14 +56,21 @@ impl Fanout {
         self.sinks.push((id, Some(sink)));
     }
 
+    /// Remove an existing sink as an output.
     fn remove(&mut self, id: &ComponentKey) {
-        // it might not always be there because it could be in-flight, in which case it simply
-        // won't get re-added after the write it aborted
+        // The sink may not be present in `self.sinks` if it is currently moved out as part of an
+        // in-flight send operation. If that's the case, the send operation should have been
+        // aborted and the sink will simply not be readded.
         if let Some(i) = self.sinks.iter().position(|(n, _)| n == id) {
             let (_id, _removed) = self.sinks.remove(i);
         }
     }
 
+    /// Replace an existing sink as an output.
+    ///
+    /// If the `sink` passed is `None`, operation of the `Fanout` will be paused until a `Some`
+    /// with the same key is received. This allows for cases where the previous version of
+    /// a stateful sink must be dropped before the new version can be created.
     fn replace(&mut self, id: ComponentKey, sink: Option<BufferSender<Event>>) {
         if let Some((_, existing)) = self.sinks.iter_mut().find(|(n, _)| n == &id) {
             *existing = sink;
@@ -110,16 +117,17 @@ impl Fanout {
         self.process_control_messages();
         self.wait_for_replacements().await;
 
+        // The call to `wait_for_replacements` above ensures that all replacement operations are
+        // complete at this point, and we don't need to worry about any of the sinks being `None`.
+        let sink_count = self.sinks.iter().filter(|x| x.1.is_some()).count();
+        debug_assert_eq!(sink_count, self.sinks.len());
+
         if self.sinks.is_empty() {
             return;
         }
 
-        let count = self.sinks.iter().filter(|x| x.1.is_some()).count();
-        // the `fanout_wait` test shows that we never actually do any sends with a `None` sink
-        assert_eq!(count, self.sinks.len());
-
-        let mut clone_army: Vec<Vec<Event>> = Vec::with_capacity(count);
-        for _ in 0..(count - 1) {
+        let mut clone_army: Vec<Vec<Event>> = Vec::with_capacity(sink_count);
+        for _ in 0..(sink_count - 1) {
             clone_army.push(events.clone());
         }
         clone_army.push(events);
@@ -127,7 +135,7 @@ impl Fanout {
         let sinks = self
             .sinks
             .drain(..)
-            .map(|(id, sink)| (id, sink.expect("no missing sinks")))
+            .map(|(id, sink)| (id, sink.expect("no replacements in progress")))
             .zip(clone_army)
             .collect::<Vec<_>>();
 
@@ -155,7 +163,7 @@ impl Fanout {
                 jobs.push(job);
                 handles.insert(id, handle);
             } else {
-                // non-blocking sinks are first in line next time
+                // Sinks that did not block are first in line for the next iteration
                 self.sinks.push((id, Some(sink)));
             }
         }
@@ -172,9 +180,10 @@ impl Fanout {
                             self.sinks.push((id, Some(sink)));
                         }
                         Some(Err(futures::future::Aborted)) => {
-                            // sink has been removed, that's fine
+                            // The sink in question has been removed, nothing to do
                         }
                         None => {
+                            // All in-flight sends have completed
                             break;
                         }
                     }

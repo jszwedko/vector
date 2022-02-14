@@ -75,7 +75,7 @@ where
     pub fn try_send(&self, item: T) -> Result<(), T> {
         match self {
             Self::Channel(tx) => tx.try_send(item),
-            Self::Opaque(_) => todo!("figure this out later"),
+            Self::Opaque(_) => Err(item), // just don't support this
         }
     }
 }
