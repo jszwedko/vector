@@ -28,7 +28,7 @@ use crate::{
         SourceConfig, SourceContext,
     },
     event::Event,
-    internal_events::{HttpBytesReceived, HttpDecompressError},
+    internal_events::{HttpBytesReceived, HttpDecompressError, StreamClosedError},
     serde::{bool_or_struct, default_decoding, default_framing_message_based},
     sources::{self, util::ErrorMessage},
     tls::{MaybeTlsSettings, TlsConfig},
@@ -306,18 +306,15 @@ pub(crate) async fn handle_request(
     match events {
         Ok(mut events) => {
             let receiver = BatchNotifier::maybe_apply_to_events(acknowledgements, &mut events);
+            let count = events.len();
 
-            let mut events = futures::stream::iter(events);
             if let Some(name) = output {
-                out.send_all_named(name, &mut events).await
+                out.send_batch_named(name, events).await
             } else {
-                out.send_all(&mut events).await
+                out.send_batch(events).await
             }
             .map_err(move |error: crate::source_sender::ClosedError| {
-                // can only fail if receiving end disconnected, so we are shutting down,
-                // probably not gracefully.
-                error!(message = "Failed to forward events, downstream is closed.");
-                error!(message = "Tried to send the following event.", %error);
+                emit!(&StreamClosedError { error, count });
                 warp::reject::custom(ApiError::ServerShutdown)
             })?;
             match receiver {
