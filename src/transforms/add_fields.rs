@@ -6,7 +6,8 @@ use toml::value::Value as TomlValue;
 
 use crate::{
     config::{
-        DataType, GenerateConfig, Output, TransformConfig, TransformContext, TransformDescription,
+        DataType, GenerateConfig, Input, Output, TransformConfig, TransformContext,
+        TransformDescription,
     },
     event::{Event, Value},
     internal_events::{
@@ -71,8 +72,8 @@ impl TransformConfig for AddFieldsConfig {
         Ok(Transform::function(AddFields::new(fields, self.overwrite)?))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Log
+    fn input(&self) -> Input {
+        Input::log()
     }
 
     fn outputs(&self) -> Vec<Output> {
@@ -200,18 +201,21 @@ mod tests {
         let log = LogEvent::from("hello world");
         let mut expected = log.clone();
         expected.insert("float", 4.5);
-        expected.insert("int", 4);
+        expected.insert("int", 4_i64);
         expected.insert("string", "thisisastring");
         expected.insert("bool", true);
-        expected.insert("array", Value::Array(vec![1.into(), 2.into(), 3.into()]));
+        expected.insert(
+            "array",
+            Value::Array(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]),
+        );
         expected.insert(
             "table",
-            Value::Map(vec![("key".into(), "value".into())].into_iter().collect()),
+            Value::Object(vec![("key".into(), "value".into())].into_iter().collect()),
         );
 
         let mut fields = IndexMap::new();
         fields.insert(String::from("float"), Value::from(4.5));
-        fields.insert(String::from("int"), Value::from(4));
+        fields.insert(String::from("int"), Value::from(4_i64));
         fields.insert(String::from("string"), Value::from("thisisastring"));
         fields.insert(String::from("bool"), Value::from(true));
         fields.insert(String::from("array"), Value::from(vec![1_isize, 2, 3]));

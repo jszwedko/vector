@@ -10,7 +10,7 @@ use tower::ServiceBuilder;
 
 use crate::{
     aws::rusoto::RegionOrEndpoint,
-    config::{log_schema, DataType, SinkConfig, SinkContext},
+    config::{log_schema, DataType, Input, SinkConfig, SinkContext},
     event::{EventRef, LogEvent, Value},
     http::HttpClient,
     internal_events::TemplateRenderingError,
@@ -243,7 +243,7 @@ impl DataStreamConfig {
         let existing = log
             .as_map_mut()
             .entry("data_stream".into())
-            .or_insert_with(|| Value::Map(BTreeMap::new()))
+            .or_insert_with(|| Value::Object(BTreeMap::new()))
             .as_map_mut();
         if let Some(dtype) = dtype {
             existing
@@ -341,8 +341,8 @@ impl SinkConfig for ElasticSearchConfig {
         Ok((stream, healthcheck))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Any
+    fn input(&self) -> Input {
+        Input::new(DataType::Metric | DataType::Log)
     }
 
     fn sink_type(&self) -> &'static str {

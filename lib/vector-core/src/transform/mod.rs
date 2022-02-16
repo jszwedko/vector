@@ -434,6 +434,7 @@ impl OutputBuffer {
         self.0.first().and_then(|first| match first {
             EventArray::Logs(l) => l.first().map(Into::into),
             EventArray::Metrics(m) => m.first().map(Into::into),
+            EventArray::Traces(t) => t.first().map(Into::into),
         })
     }
 

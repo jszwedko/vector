@@ -8,7 +8,7 @@ use std::{iter, slice, vec};
 use quickcheck::{Arbitrary, Gen};
 use vector_buffers::EventCount;
 
-use super::{Event, EventDataEq, EventRef, LogEvent, Metric};
+use super::{Event, EventDataEq, EventRef, LogEvent, Metric, TraceEvent};
 use crate::ByteSizeOf;
 
 /// The core trait to abstract over any type that may work as an array
@@ -82,6 +82,9 @@ impl EventContainer for Metric {
 /// The type alias for an array of `LogEvent` elements.
 pub type LogArray = Vec<LogEvent>;
 
+/// The type alias for an array of `TraceEvent` elements.
+pub type TraceArray = Vec<TraceEvent>;
+
 impl EventContainer for LogArray {
     type IntoIter = iter::Map<vec::IntoIter<LogEvent>, fn(LogEvent) -> Event>;
 
@@ -116,6 +119,8 @@ pub enum EventArray {
     Logs(LogArray),
     /// An array of type `Metric`
     Metrics(MetricArray),
+    /// An array of type `TraceEvent`
+    Traces(TraceArray),
 }
 
 impl EventArray {
@@ -133,11 +138,19 @@ impl EventArray {
         }
     }
 
+    /// Run the given update function over each `Trace` in this array.
+    pub fn for_each_trace(&mut self, update: impl FnMut(&mut TraceEvent)) {
+        if let Self::Traces(traces) = self {
+            traces.iter_mut().for_each(update);
+        }
+    }
+
     /// Iterate over this array's events.
     pub fn iter_events(&self) -> impl Iterator<Item = EventRef> {
         match self {
             Self::Logs(array) => EventArrayIter::Logs(array.iter()),
             Self::Metrics(array) => EventArrayIter::Metrics(array.iter()),
+            Self::Traces(array) => EventArrayIter::Traces(array.iter()),
         }
     }
 }
@@ -147,6 +160,7 @@ impl From<Event> for EventArray {
         match event {
             Event::Log(log) => Self::Logs(vec![log]),
             Event::Metric(metric) => Self::Metrics(vec![metric]),
+            Event::Trace(trace) => Self::Traces(vec![trace]),
         }
     }
 }
@@ -166,7 +180,7 @@ impl From<MetricArray> for EventArray {
 impl ByteSizeOf for EventArray {
     fn allocated_bytes(&self) -> usize {
         match self {
-            Self::Logs(a) => a.allocated_bytes(),
+            Self::Logs(a) | Self::Traces(a) => a.allocated_bytes(),
             Self::Metrics(a) => a.allocated_bytes(),
         }
     }
@@ -177,6 +191,7 @@ impl EventCount for EventArray {
         match self {
             Self::Logs(a) => a.len(),
             Self::Metrics(a) => a.len(),
+            Self::Traces(a) => a.len(),
         }
     }
 }
@@ -186,7 +201,7 @@ impl EventContainer for EventArray {
 
     fn len(&self) -> usize {
         match self {
-            Self::Logs(a) => a.len(),
+            Self::Logs(a) | Self::Traces(a) => a.len(),
             Self::Metrics(a) => a.len(),
         }
     }
@@ -195,6 +210,7 @@ impl EventContainer for EventArray {
         match self {
             Self::Logs(a) => EventArrayIntoIter::Logs(a.into_iter()),
             Self::Metrics(a) => EventArrayIntoIter::Metrics(a.into_iter()),
+            Self::Traces(a) => EventArrayIntoIter::Traces(a.into_iter()),
         }
     }
 }
@@ -216,18 +232,19 @@ impl Arbitrary for EventArray {
         let choice: u8 = u8::arbitrary(g);
         // Quickcheck can't derive Arbitrary for enums, see
         // https://github.com/BurntSushi/quickcheck/issues/98
-        if choice % 2 == 0 {
-            let mut logs = Vec::new();
-            for _ in 0..len {
-                logs.push(LogEvent::arbitrary(g));
+        match choice % 3 {
+            0 => {
+                let logs = (0..len).map(|_| LogEvent::arbitrary(g)).collect();
+                EventArray::Logs(logs)
             }
-            EventArray::Logs(logs)
-        } else {
-            let mut metrics = Vec::new();
-            for _ in 0..len {
-                metrics.push(Metric::arbitrary(g));
+            1 => {
+                let metrics = (0..len).map(|_| Metric::arbitrary(g)).collect();
+                EventArray::Metrics(metrics)
             }
-            EventArray::Metrics(metrics)
+            _ => {
+                let traces = (0..len).map(|_| TraceEvent::arbitrary(g)).collect();
+                EventArray::Traces(traces)
+            }
         }
     }
 
@@ -235,6 +252,7 @@ impl Arbitrary for EventArray {
         match self {
             EventArray::Logs(logs) => Box::new(logs.shrink().map(EventArray::Logs)),
             EventArray::Metrics(metrics) => Box::new(metrics.shrink().map(EventArray::Metrics)),
+            EventArray::Traces(metrics) => Box::new(metrics.shrink().map(EventArray::Traces)),
         }
     }
 }
@@ -246,6 +264,8 @@ pub enum EventArrayIter<'a> {
     Logs(slice::Iter<'a, LogEvent>),
     /// An iterator over type `Metric`.
     Metrics(slice::Iter<'a, Metric>),
+    /// An iterator over type `TraceEvent`.
+    Traces(slice::Iter<'a, TraceEvent>),
 }
 
 impl<'a> Iterator for EventArrayIter<'a> {
@@ -255,6 +275,7 @@ impl<'a> Iterator for EventArrayIter<'a> {
         match self {
             Self::Logs(i) => i.next().map(EventRef::from),
             Self::Metrics(i) => i.next().map(EventRef::from),
+            Self::Traces(i) => i.next().map(EventRef::from),
         }
     }
 }
@@ -266,6 +287,8 @@ pub enum EventArrayIntoIter {
     Logs(vec::IntoIter<LogEvent>),
     /// An iterator over type `Metric`.
     Metrics(vec::IntoIter<Metric>),
+    /// An iterator over type `LogEvent` but for Traces.
+    Traces(vec::IntoIter<LogEvent>),
 }
 
 impl Iterator for EventArrayIntoIter {
@@ -275,6 +298,7 @@ impl Iterator for EventArrayIntoIter {
         match self {
             Self::Logs(i) => i.next().map(Into::into),
             Self::Metrics(i) => i.next().map(Into::into),
+            Self::Traces(i) => i.next().map(Event::Trace),
         }
     }
 }

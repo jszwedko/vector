@@ -200,7 +200,7 @@ async fn multiple_inputs_backpressure() {
 }
 
 mod test_sink {
-    use crate::config::{DataType, SinkConfig, SinkContext};
+    use crate::config::{Input, SinkConfig, SinkContext};
     use crate::event::Event;
     use crate::sinks::util::StreamSink;
     use crate::sinks::{Healthcheck, VectorSink};
@@ -225,7 +225,7 @@ mod test_sink {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
-    pub struct TestBackpressureSinkConfig {
+    pub(super) struct TestBackpressureSinkConfig {
         pub num_to_consume: usize,
     }
 
@@ -240,8 +240,8 @@ mod test_sink {
             Ok((VectorSink::from_event_streamsink(sink), healthcheck))
         }
 
-        fn input_type(&self) -> DataType {
-            DataType::Any
+        fn input(&self) -> Input {
+            Input::all()
         }
 
         fn sink_type(&self) -> &'static str {
@@ -283,7 +283,7 @@ mod test_source {
         }
 
         fn outputs(&self) -> Vec<Output> {
-            vec![Output::default(DataType::Any)]
+            vec![Output::default(DataType::all())]
         }
 
         fn source_type(&self) -> &'static str {

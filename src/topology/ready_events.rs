@@ -40,6 +40,13 @@ impl<S> ReadyEvents<S> {
                     self.buffer = buffer;
                     result
                 }
+                (EventArray::Traces(mut buffered), EventArray::Traces(incoming)) => {
+                    buffered.extend(incoming);
+                    let (result, buffer) =
+                        split_buffer(buffered, self.capacity, EventArray::Traces);
+                    self.buffer = buffer;
+                    result
+                }
                 (buffered, incoming) => {
                     self.buffer = Some(incoming);
                     Some(buffered)
@@ -54,6 +61,7 @@ fn split_array(events: EventArray, capacity: usize) -> (Option<EventArray>, Opti
     match events {
         EventArray::Logs(buffer) => split_buffer(buffer, capacity, EventArray::Logs),
         EventArray::Metrics(buffer) => split_buffer(buffer, capacity, EventArray::Metrics),
+        EventArray::Traces(buffer) => split_buffer(buffer, capacity, EventArray::Traces),
     }
 }
 
