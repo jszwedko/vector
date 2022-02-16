@@ -12,26 +12,29 @@ pub use metric::Value as MetricValue;
 
 use super::{array, metric::MetricSketch};
 
-impl From<array::LogArray> for event_array::Events {
-    fn from(logs: array::LogArray) -> Self {
+impl event_array::Events {
+    fn from_logs(logs: array::LogArray) -> Self {
         let logs = logs.into_iter().map(Into::into).collect();
         Self::Logs(LogArray { logs })
     }
-}
 
-impl From<array::MetricArray> for event_array::Events {
-    fn from(metrics: array::MetricArray) -> Self {
+    fn from_metrics(metrics: array::MetricArray) -> Self {
         let metrics = metrics.into_iter().map(Into::into).collect();
         Self::Metrics(MetricArray { metrics })
+    }
+
+    fn from_traces(traces: array::TraceArray) -> Self {
+        let traces = traces.into_iter().map(Into::into).collect();
+        Self::Traces(TraceArray { traces })
     }
 }
 
 impl From<array::EventArray> for EventArray {
     fn from(events: array::EventArray) -> Self {
         let events = Some(match events {
-            array::EventArray::Logs(logs) => logs.into(),
-            array::EventArray::Metrics(metrics) => metrics.into(),
-            array::EventArray::Traces(traces) => traces.into(),
+            array::EventArray::Logs(logs) => event_array::Events::from_logs(logs),
+            array::EventArray::Metrics(metrics) => event_array::Events::from_metrics(metrics),
+            array::EventArray::Traces(traces) => event_array::Events::from_traces(traces),
         });
         Self { events }
     }
@@ -47,6 +50,9 @@ impl From<EventArray> for array::EventArray {
             }
             event_array::Events::Metrics(metrics) => {
                 array::EventArray::Metrics(metrics.metrics.into_iter().map(Into::into).collect())
+            }
+            event_array::Events::Traces(traces) => {
+                array::EventArray::Traces(traces.traces.into_iter().map(Into::into).collect())
             }
         }
     }

@@ -7,6 +7,7 @@ message EventArray {
   oneof events {
     LogArray logs = 1;
     MetricArray metrics = 2;
+    TraceArray traces = 3;
   }
 }
 
@@ -16,6 +17,10 @@ message LogArray {
 
 message MetricArray {
   repeated Metric metrics = 1;
+}
+
+message TraceArray {
+  repeated Trace traces = 1;
 }
 
 message EventWrapper {
