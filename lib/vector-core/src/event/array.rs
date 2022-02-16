@@ -189,9 +189,8 @@ impl ByteSizeOf for EventArray {
 impl EventCount for EventArray {
     fn event_count(&self) -> usize {
         match self {
-            Self::Logs(a) => a.len(),
+            Self::Logs(a) | Self::Traces(a) => a.len(),
             Self::Metrics(a) => a.len(),
-            Self::Traces(a) => a.len(),
         }
     }
 }
@@ -273,9 +272,8 @@ impl<'a> Iterator for EventArrayIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Logs(i) => i.next().map(EventRef::from),
+            Self::Logs(i) | Self::Traces(i) => i.next().map(EventRef::from),
             Self::Metrics(i) => i.next().map(EventRef::from),
-            Self::Traces(i) => i.next().map(EventRef::from),
         }
     }
 }
