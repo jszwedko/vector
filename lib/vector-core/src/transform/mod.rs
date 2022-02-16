@@ -422,7 +422,7 @@ impl OutputBuffer {
     }
 
     async fn send(&mut self, output: &mut Fanout) {
-        output.send_all(std::mem::take(&mut self.0)).await
+        output.send_all(std::mem::take(&mut self.0)).await;
     }
 
     pub fn into_events(self) -> impl Iterator<Item = Event> {

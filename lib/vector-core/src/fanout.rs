@@ -1,7 +1,13 @@
 use crate::{config::ComponentKey, event::Event};
-use futures::{stream, SinkExt, Stream, StreamExt};
-use futures_util::stream::FuturesUnordered;
-use std::{collections::HashMap, fmt};
+use futures::{task::AtomicWaker, Sink, Stream, StreamExt};
+use pin_project::pin_project;
+use std::{
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 use tokio::sync::mpsc;
 use vector_buffers::topology::channel::BufferSender;
 
@@ -58,9 +64,6 @@ impl Fanout {
 
     /// Remove an existing sink as an output.
     fn remove(&mut self, id: &ComponentKey) {
-        // The sink may not be present in `self.sinks` if it is currently moved out as part of an
-        // in-flight send operation. If that's the case, the send operation should have been
-        // aborted and the sink will simply not be readded.
         if let Some(i) = self.sinks.iter().position(|(n, _)| n == id) {
             let (_id, _removed) = self.sinks.remove(i);
         }
@@ -81,6 +84,11 @@ impl Fanout {
         }
     }
 
+    fn contains(&mut self, id: &ComponentKey) -> bool {
+        self.sinks.iter().any(|(n, _)| n == id)
+    }
+
+    /// Process any available control messages, without blocking to wait for more.
     pub fn process_control_messages(&mut self) {
         while let Ok(message) = self.control_channel.try_recv() {
             self.handle_control_message(message);
@@ -95,6 +103,8 @@ impl Fanout {
         }
     }
 
+    /// If any sink is awaiting replacement (i.e. it was temporarily replaced with `None`), read
+    /// and process messages from the control channel until that is no longer true.
     async fn wait_for_replacements(&mut self) {
         while self.sinks.iter().any(|x| x.1.is_none()) {
             if let Some(msg) = self.control_channel.recv().await {
@@ -113,6 +123,16 @@ impl Fanout {
         }
     }
 
+    /// Send a batch of events to all connected sinks.
+    ///
+    /// This will block on the resolution of any pending reload before proceeding with the send
+    /// operation.
+    ///
+    /// # Panics
+    ///
+    /// This method can panic if the fanout receives a control message that violates some invariant
+    /// about its current state (e.g. remove a non-existant sink, etc). This would imply a bug in
+    /// Vector's config reloading logic.
     pub async fn send_all(&mut self, events: Vec<Event>) {
         self.process_control_messages();
         self.wait_for_replacements().await;
@@ -136,78 +156,222 @@ impl Fanout {
             .sinks
             .drain(..)
             .map(|(id, sink)| (id, sink.expect("no replacements in progress")))
-            .zip(clone_army)
-            .collect::<Vec<_>>();
+            .zip(clone_army);
 
-        let mut jobs = FuturesUnordered::new();
-        let mut handles = HashMap::new();
+        let mut send_group = SendGroup::with_capacity(sink_count);
 
-        for ((id, mut sink), events) in sinks {
-            let mut blocked = None;
-            let mut drain = events.into_iter();
-            while let Some(event) = drain.next() {
-                if let Err(event) = sink.try_send(event) {
-                    blocked = Some(event);
-                    break;
-                }
-            }
-            if let Some(event) = blocked {
-                let id2 = id.clone();
-                let (job, handle) = futures::future::abortable(async move {
-                    sink.send(event).await.expect("unit error");
-                    sink.send_all(&mut stream::iter(drain).map(Ok))
-                        .await
-                        .expect("unit error");
-                    (id2, sink)
-                });
-                jobs.push(job);
-                handles.insert(id, handle);
-            } else {
-                // Sinks that did not block are first in line for the next iteration
-                self.sinks.push((id, Some(sink)));
-            }
-        }
-
-        if jobs.is_empty() {
-            return;
+        for ((id, sink), events) in sinks {
+            send_group.push(id, sink, events);
         }
 
         loop {
             tokio::select! {
-                poll_result = jobs.next() => {
-                    match poll_result {
-                        Some(Ok((id, sink))) => {
-                            self.sinks.push((id, Some(sink)));
+                sinks = &mut send_group => {
+                    // All in-flight sends have completed, so return sinks to the base collection.
+                    // We extend instead of assign here because other sinks could have been added
+                    // while the send was in-flight.
+                    self.sinks.extend(sinks);
+                    break;
+                }
+                maybe_msg = self.control_channel.recv() => {
+                    match maybe_msg {
+                        Some(msg @ ControlMessage::Add(..)) => {
+                            // New sinks will be picked up on the next call, so we just need to add
+                            // them to the base `sinks` collection.
+                            self.handle_control_message(msg);
+                        },
+                        Some(ControlMessage::Remove(key)) => {
+                            if self.contains(&key) {
+                                // Sink was added while sends were in-flight, so just remove it.
+                                self.remove(&key);
+                            } else {
+                                // Otherwise, send should be in-flight so remove it from the group.
+                                send_group.remove(&key);
+                            }
                         }
-                        Some(Err(futures::future::Aborted)) => {
-                            // The sink in question has been removed, nothing to do
+                        Some(ControlMessage::Replace(key, Some(sink))) => {
+                            if self.contains(&key) {
+                                // Sink was added while sends were in-flight, so just replace it.
+                                self.replace(key, Some(sink));
+                            } else {
+                                // Otherwise, send should be in-flight so do the replace there.
+                                send_group.replace(&key, sink);
+                            }
+                        }
+                        Some(ControlMessage::Replace(key, None)) => {
+                            if self.contains(&key) {
+                                // Sink was added while sends were in-flight, so just replace it.
+                                self.replace(key, None);
+                            } else {
+                                // Otherwise, send should be in-flight so we need to pause it.
+                                send_group.pause(&key);
+                            }
                         }
                         None => {
-                            // All in-flight sends have completed
-                            break;
+                            // Control channel is closed, process must be shutting down
                         }
                     }
-                }
-                Some(msg) = self.control_channel.recv() => {
-                    // TODO: is there any better we can do for the replace case? This essentially
-                    // takes the position that the send has been initiated and only new events
-                    // after that point will flow into the replacement sink. Those events could be
-                    // considered "lost" in one sense, but in another, they were sent before the
-                    // replacement was initiated and therefore maybe shouldn't be expected at the
-                    // new sink?
-                    if let ControlMessage::Remove(key) | ControlMessage::Replace(key, _) = &msg {
-                        if let Some(handle) = handles.get(key) {
-                            handle.abort();
-                        }
-                    }
-                    self.handle_control_message(msg);
                 }
             }
         }
     }
 
     pub async fn send(&mut self, event: Event) {
-        self.send_all(vec![event]).await
+        self.send_all(vec![event]).await;
+    }
+}
+
+#[pin_project]
+struct SendGroup {
+    #[pin]
+    sends: Vec<(ComponentKey, SendOp)>,
+    waker: Arc<AtomicWaker>,
+}
+
+impl SendGroup {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            sends: Vec::with_capacity(capacity),
+            waker: Arc::new(AtomicWaker::new()),
+        }
+    }
+
+    fn push(&mut self, id: ComponentKey, sink: BufferSender<Event>, input: Vec<Event>) {
+        let send = SendOp::new(sink, input, Arc::clone(&self.waker));
+        self.sends.push((id, send));
+    }
+
+    fn remove(&mut self, id: &ComponentKey) {
+        if let Some(i) = self.sends.iter().position(|(n, _)| n == id) {
+            let (_id, _removed) = self.sends.remove(i);
+        } else {
+            panic!("Tried to remove a sink that's not present");
+        }
+    }
+
+    fn replace(&mut self, id: &ComponentKey, sink: BufferSender<Event>) {
+        if let Some((_, send)) = self.sends.iter_mut().find(|(n, _)| n == id) {
+            send.replace(sink);
+            // This may have unpaused a send operation, so make sure it is woken up.
+            self.waker.wake();
+        } else {
+            panic!("Tried to replace a sink that's not already present");
+        }
+    }
+
+    fn pause(&mut self, id: &ComponentKey) {
+        if let Some((_, send)) = self.sends.iter_mut().find(|(n, _)| n == id) {
+            send.pause();
+        } else {
+            panic!("Tried to pause a sink that's not already present");
+        }
+    }
+}
+
+impl Future for SendGroup {
+    type Output = Vec<(ComponentKey, Option<BufferSender<Event>>)>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut pending = false;
+        let this = self.as_mut().project();
+        for (_key, send) in this.sends.get_mut() {
+            let send = Pin::new(send);
+            if send.poll(cx).is_pending() {
+                pending = true;
+            }
+        }
+
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(
+                self.sends
+                    .drain(..)
+                    .map(|(id, send)| (id, Some(send.take())))
+                    .collect(),
+            )
+        }
+    }
+}
+
+#[pin_project]
+struct SendOp {
+    #[pin]
+    state: SendState<BufferSender<Event>>,
+    input: std::vec::IntoIter<Event>,
+    slot: Option<Event>,
+    waker: Arc<AtomicWaker>,
+}
+
+#[pin_project(project = SendStateProj)]
+enum SendState<T> {
+    Active(#[pin] T),
+    Paused,
+}
+
+impl SendOp {
+    fn new(sink: BufferSender<Event>, input: Vec<Event>, waker: Arc<AtomicWaker>) -> Self {
+        Self {
+            state: SendState::Active(sink),
+            input: input.into_iter(),
+            slot: None,
+            waker,
+        }
+    }
+
+    fn replace(&mut self, sink: BufferSender<Event>) {
+        self.state = SendState::Active(sink);
+    }
+
+    fn pause(&mut self) {
+        self.state = SendState::Paused;
+    }
+
+    fn take(self) -> BufferSender<Event> {
+        match self.state {
+            SendState::Active(sink) => sink,
+            SendState::Paused => panic!("attempting to take a paused sink"),
+        }
+    }
+}
+
+impl Future for SendOp {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        loop {
+            match this.state.as_mut().project() {
+                SendStateProj::Active(mut sink) => {
+                    if let Some(event) = this.slot.take().or_else(|| this.input.next()) {
+                        match sink.as_mut().poll_ready(cx) {
+                            Poll::Ready(Ok(())) => {
+                                sink.start_send(event).expect("unit error");
+                            }
+                            Poll::Ready(Err(())) => {
+                                panic!("unit error");
+                            }
+                            Poll::Pending => {
+                                *this.slot = Some(event);
+                                return Poll::Pending;
+                            }
+                        }
+                    } else {
+                        return Poll::Ready(());
+                    }
+                }
+                SendStateProj::Paused => {
+                    // This likely isn't strictly necessary given how this future is used right now
+                    // (i.e. only a single task, gets polled in the same select loop that wakes
+                    // it), but it would be a bit of a footgun to leave out this part of the
+                    // `Future` contract. Basically, this ensure that even if the future is spawned
+                    // some other way, we'll get woken up to make progress when the sink is added
+                    // back.
+                    this.waker.register(cx.waker());
+                    return Poll::Pending;
+                }
+            }
+        }
     }
 }
 
