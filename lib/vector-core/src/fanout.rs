@@ -188,7 +188,11 @@ impl Fanout {
                         },
                         Some(ControlMessage::Remove(key)) => {
                             if self.contains(&key) {
-                                // Sink was added while sends were in-flight, so just remove it.
+                                // If the key is present in `self.sinks`, that implies it was not
+                                // present when we initiated the send operation. If it had been
+                                // present, it would have been moved in the the `SendGroup`. This
+                                // means it's not part of any ongoing send operation and can simply
+                                // be removed.
                                 self.remove(&key);
                             } else {
                                 // Otherwise, send should be in-flight so remove it from the group.
@@ -197,7 +201,11 @@ impl Fanout {
                         }
                         Some(ControlMessage::Replace(key, Some(sink))) => {
                             if self.contains(&key) {
-                                // Sink was added while sends were in-flight, so just replace it.
+                                // If the key is present in `self.sinks`, that implies it was not
+                                // present when we initiated the send operation. If it had been
+                                // present, it would have been moved in the the `SendGroup`. This
+                                // means it's not part of any ongoing send operation and can simply
+                                // be replaced.
                                 self.replace(key, Some(sink));
                             } else {
                                 // Otherwise, send should be in-flight so do the replace there.
@@ -206,7 +214,11 @@ impl Fanout {
                         }
                         Some(ControlMessage::Replace(key, None)) => {
                             if self.contains(&key) {
-                                // Sink was added while sends were in-flight, so just replace it.
+                                // If the key is present in `self.sinks`, that implies it was not
+                                // present when we initiated the send operation. If it had been
+                                // present, it would have been moved in the the `SendGroup`. This
+                                // means it's not part of any ongoing send operation and can simply
+                                // be replaced.
                                 self.replace(key, None);
                             } else {
                                 // Otherwise, send should be in-flight so we need to pause it.
