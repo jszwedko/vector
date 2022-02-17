@@ -164,16 +164,22 @@ impl Fanout {
             send_group.push(id, sink, events);
         }
 
+        // Keep track of whether the control channel has returned `Ready(None)`, and stop polling
+        // it once it has. If we don't do this check, it will continue to return `Ready(None)` any
+        // time it is polled, which can lead to a busy loop below.
+        //
+        // In real life this is likely a non-issue, but it can lead to strange behavior in tests if
+        // left unhandled.
+        let mut control_channel_open = true;
+
         loop {
             tokio::select! {
-                sinks = &mut send_group => {
-                    // All in-flight sends have completed, so return sinks to the base collection.
-                    // We extend instead of assign here because other sinks could have been added
-                    // while the send was in-flight.
-                    self.sinks.extend(sinks);
-                    break;
-                }
-                maybe_msg = self.control_channel.recv() => {
+                // Semantically, it's not hugely important that this select is biased. It does,
+                // however, make testing simpler when you can count on control messages being
+                // processed first.
+                biased;
+
+                maybe_msg = self.control_channel.recv(), if control_channel_open => {
                     match maybe_msg {
                         Some(msg @ ControlMessage::Add(..)) => {
                             // New sinks will be picked up on the next call, so we just need to add
@@ -209,8 +215,17 @@ impl Fanout {
                         }
                         None => {
                             // Control channel is closed, process must be shutting down
+                            control_channel_open = false;
                         }
                     }
+                }
+
+                sinks = &mut send_group => {
+                    // All in-flight sends have completed, so return sinks to the base collection.
+                    // We extend instead of assign here because other sinks could have been added
+                    // while the send was in-flight.
+                    self.sinks.extend(sinks);
+                    break;
                 }
             }
         }
@@ -586,13 +601,14 @@ mod tests {
 
     #[tokio::test]
     async fn fanout_shrink_when_notready() {
-        // This test exercises that when we're waiting for all sinks to become ready for a send
-        // before actually doing it, we can still correctly remove a sender that was already ready, or
-        // a sender which itself was the cause of not yet being ready, or a sender which has not yet
-        // been polled for readiness.
+        // This test exercises that when we're waiting for a send to complete, we can correctly
+        // remove a sink whether or not it is the one that the send operation is still waiting on.
+        let events = make_events(2);
+        let mut results: Vec<Vec<Option<()>>> = Vec::new();
+
         for sender_id in [0, 1, 2] {
             let (mut fanout, control, mut receivers) = fanout_from_senders(&[2, 1, 2]).await;
-            let events = make_events(2);
+            let events = events.clone();
 
             // First send should immediately complete because all senders have capacity:
             let mut first_send = spawn(async { fanout.send(events[0].clone()).await });
@@ -616,28 +632,25 @@ mod tests {
             assert_ready!(second_send.poll());
             drop(second_send);
 
-            for (i, receiver) in receivers.iter_mut().enumerate() {
-                if i != sender_id {
-                    assert!(
-                        receiver.next().await.is_some(),
-                        "receiver {} is not sender_id {} and should have the event",
-                        i,
-                        sender_id
-                    );
-                }
+            let mut scenario_results = Vec::new();
+            for receiver in receivers.iter_mut() {
+                scenario_results.push(receiver.next().await.map(|_| ()));
             }
-
-            // let mut expected_next = [
-            // Some(events[1].clone()),
-            // Some(events[1].clone()),
-            // Some(events[1].clone()),
-            // ];
-            // expected_next[sender_id] = None;
-
-            // for (i, receiver) in receivers.iter_mut().enumerate() {
-            // assert_eq!(expected_next[i], receiver.next().await);
-            // }
+            results.push(scenario_results);
         }
+
+        let expected = [
+            // When we remove the first sender, it will still receive the event because it had
+            // capacity at the time the send was initiated.
+            [Some(()), Some(()), Some(())],
+            // When we remove the second sender, it will not receive the event because it was
+            // full when the send was initiated and removed before it could progress.
+            [Some(()), None, Some(())],
+            // Same as with the first, the third sender receives the event when removed because it
+            // had space when the send was initiated.
+            [Some(()), Some(()), Some(())],
+        ];
+        assert_eq!(results, expected);
     }
 
     #[tokio::test]
