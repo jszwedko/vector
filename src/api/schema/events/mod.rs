@@ -17,7 +17,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::{api::tap::TapController, topology::WatchRx};
 
 #[derive(Debug, Default)]
-pub struct EventsSubscription;
+pub(super) struct EventsSubscription;
 
 #[Subscription]
 impl EventsSubscription {
