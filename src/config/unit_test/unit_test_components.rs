@@ -66,7 +66,7 @@ impl Default for UnitTestSinkCheck {
 #[derive(Debug)]
 pub(crate) struct UnitTestSinkResult {
     pub(crate) test_name: String,
-    pub test_errors: Vec<String>,
+    pub(crate) test_errors: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Derivative)]
