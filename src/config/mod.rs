@@ -751,7 +751,7 @@ pub struct TestInput {
     #[serde(default = "default_test_input_type", rename = "type")]
     pub(super) type_str: String,
     pub value: Option<String>,
-    pub log_fields: Option<IndexMap<String, TestInputValue>>,
+    log_fields: Option<IndexMap<String, TestInputValue>>,
     pub metric: Option<Metric>,
 }
 
