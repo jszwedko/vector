@@ -1,5 +1,6 @@
 use crate::{config::ComponentKey, event::Event};
 use futures::{task::AtomicWaker, Sink, Stream, StreamExt};
+use indexmap::IndexMap;
 use pin_project::pin_project;
 use std::{
     fmt,
@@ -32,7 +33,7 @@ impl fmt::Debug for ControlMessage {
 pub type ControlChannel = mpsc::UnboundedSender<ControlMessage>;
 
 pub struct Fanout {
-    sinks: Vec<(ComponentKey, Option<BufferSender<Event>>)>,
+    sinks: IndexMap<ComponentKey, Option<BufferSender<Event>>>,
     control_channel: mpsc::UnboundedReceiver<ControlMessage>,
 }
 
@@ -41,7 +42,7 @@ impl Fanout {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
 
         let fanout = Self {
-            sinks: vec![],
+            sinks: Default::default(),
             control_channel: control_rx,
         };
 
@@ -55,18 +56,22 @@ impl Fanout {
     /// Function will panic if a sink with the same ID is already present.
     pub fn add(&mut self, id: ComponentKey, sink: BufferSender<Event>) {
         assert!(
-            !self.sinks.iter().any(|(n, _)| n == &id),
-            "Duplicate output id in fanout"
+            !self.sinks.contains_key(&id),
+            "Adding duplicate output id to fanout: {id}"
         );
-
-        self.sinks.push((id, Some(sink)));
+        self.sinks.insert(id, Some(sink));
     }
 
     /// Remove an existing sink as an output.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if there is no sink with the given ID.
     fn remove(&mut self, id: &ComponentKey) {
-        if let Some(i) = self.sinks.iter().position(|(n, _)| n == id) {
-            let (_id, _removed) = self.sinks.remove(i);
-        }
+        assert!(
+            self.sinks.remove(id).is_some(),
+            "Removing non-existent sink from fanout: {id}"
+        );
     }
 
     /// Replace an existing sink as an output.
@@ -74,32 +79,26 @@ impl Fanout {
     /// If the `sink` passed is `None`, operation of the `Fanout` will be paused until a `Some`
     /// with the same key is received. This allows for cases where the previous version of
     /// a stateful sink must be dropped before the new version can be created.
-    fn replace(&mut self, id: ComponentKey, sink: Option<BufferSender<Event>>) {
-        if let Some((_, existing)) = self.sinks.iter_mut().find(|(n, _)| n == &id) {
+    ///
+    /// # Panics
+    ///
+    /// Will panic if there is no sink with the given ID.
+    fn replace(&mut self, id: &ComponentKey, sink: Option<BufferSender<Event>>) {
+        if let Some(existing) = self.sinks.get_mut(id) {
             *existing = sink;
         } else {
-            // send might have been in-flight at the time, in which case it will be cancelled
-            // panic!("Tried to replace a sink that's not already present");
-            self.sinks.push((id, sink));
+            panic!("Replacing non-existent sink from fanout: {id}");
         }
     }
 
-    fn contains(&mut self, id: &ComponentKey) -> bool {
-        self.sinks.iter().any(|(n, _)| n == id)
-    }
-
-    /// Process any available control messages, without blocking to wait for more.
-    pub fn process_control_messages(&mut self) {
-        while let Ok(message) = self.control_channel.try_recv() {
-            self.handle_control_message(message);
-        }
-    }
-
-    fn handle_control_message(&mut self, message: ControlMessage) {
+    /// Apply a control message directly against this instance.
+    ///
+    /// This method should not be used if there is an active `SendGroup` being processed.
+    fn apply_control_message(&mut self, message: ControlMessage) {
         match message {
             ControlMessage::Add(id, sink) => self.add(id, sink),
             ControlMessage::Remove(id) => self.remove(&id),
-            ControlMessage::Replace(id, sink) => self.replace(id, sink),
+            ControlMessage::Replace(id, sink) => self.replace(&id, sink),
         }
     }
 
@@ -108,9 +107,9 @@ impl Fanout {
     async fn wait_for_replacements(&mut self) {
         while self.sinks.iter().any(|x| x.1.is_none()) {
             if let Some(msg) = self.control_channel.recv().await {
-                self.handle_control_message(msg);
+                self.apply_control_message(msg);
             } else {
-                // control channel is closed? probably doesn't matter what we do
+                // If the control channel is closed, there's nothing else we can do.
             }
         }
     }
@@ -131,10 +130,15 @@ impl Fanout {
     /// # Panics
     ///
     /// This method can panic if the fanout receives a control message that violates some invariant
-    /// about its current state (e.g. remove a non-existant sink, etc). This would imply a bug in
+    /// about its current state (e.g. remove a non-existent sink, etc). This would imply a bug in
     /// Vector's config reloading logic.
     pub async fn send_all(&mut self, events: Vec<Event>) {
-        self.process_control_messages();
+        // First, process any available control messages
+        while let Ok(message) = self.control_channel.try_recv() {
+            self.apply_control_message(message);
+        }
+        // If we're left in a state with pending changes, wait for those to be completed before
+        // initiating the send operation.
         self.wait_for_replacements().await;
 
         // The call to `wait_for_replacements` above ensures that all replacement operations are
@@ -181,50 +185,9 @@ impl Fanout {
 
                 maybe_msg = self.control_channel.recv(), if control_channel_open => {
                     match maybe_msg {
-                        Some(msg @ ControlMessage::Add(..)) => {
-                            // New sinks will be picked up on the next call, so we just need to add
-                            // them to the base `sinks` collection.
-                            self.handle_control_message(msg);
+                        Some(msg) => {
+                            route_control_message(msg, self, &mut send_group);
                         },
-                        Some(ControlMessage::Remove(key)) => {
-                            if self.contains(&key) {
-                                // If the key is present in `self.sinks`, that implies it was not
-                                // present when we initiated the send operation. If it had been
-                                // present, it would have been moved in the the `SendGroup`. This
-                                // means it's not part of any ongoing send operation and can simply
-                                // be removed.
-                                self.remove(&key);
-                            } else {
-                                // Otherwise, send should be in-flight so remove it from the group.
-                                send_group.remove(&key);
-                            }
-                        }
-                        Some(ControlMessage::Replace(key, Some(sink))) => {
-                            if self.contains(&key) {
-                                // If the key is present in `self.sinks`, that implies it was not
-                                // present when we initiated the send operation. If it had been
-                                // present, it would have been moved in the the `SendGroup`. This
-                                // means it's not part of any ongoing send operation and can simply
-                                // be replaced.
-                                self.replace(key, Some(sink));
-                            } else {
-                                // Otherwise, send should be in-flight so do the replace there.
-                                send_group.replace(&key, sink);
-                            }
-                        }
-                        Some(ControlMessage::Replace(key, None)) => {
-                            if self.contains(&key) {
-                                // If the key is present in `self.sinks`, that implies it was not
-                                // present when we initiated the send operation. If it had been
-                                // present, it would have been moved in the the `SendGroup`. This
-                                // means it's not part of any ongoing send operation and can simply
-                                // be replaced.
-                                self.replace(key, None);
-                            } else {
-                                // Otherwise, send should be in-flight so we need to pause it.
-                                send_group.pause(&key);
-                            }
-                        }
                         None => {
                             // Control channel is closed, process must be shutting down
                             control_channel_open = false;
@@ -248,49 +211,96 @@ impl Fanout {
     }
 }
 
+/// Apply a given control message to either the active `SendGroup` or the `Fanout` itself.
+///
+/// Given the way that send operations move their respective sinks into the `SendOp` future, it can
+/// be complex to apply control messages while sends are in-flight in a way that upholds
+/// invariants. This functions handles the task of conditionally applying messages to the
+/// `SendGroup` and falling back to applying them to the `Fanout` if the return value indicates
+/// they were not applicable to the `SendGroup`.
+///
+/// # Panics
+///
+/// If a message is received that violates an invariant (e.g. adding a duplicate sink, removing one
+/// that doesn't exist, etc), then this function will panic. Generally, the invariant itself is
+/// upheld by the modification methods on `Fanout`, which will panic if incorrectly used. We
+/// inherit that behavior here by attempting to apply the `SendGroup` methods first (which use
+/// return values to indicate failure rather than panicking) and then falling back to the `Fanout`
+/// equivalent methods.
+fn route_control_message(message: ControlMessage, fanout: &mut Fanout, send_group: &mut SendGroup) {
+    match message {
+        ControlMessage::Add(id, sink) => {
+            // Ensure we don't already have a sink with the same id as part of the send operation
+            assert!(!send_group.contains(&id));
+            fanout.add(id, sink);
+        }
+        ControlMessage::Remove(id) => {
+            if !send_group.remove(&id) {
+                fanout.remove(&id);
+            }
+        }
+        ControlMessage::Replace(id, None) => {
+            if !send_group.pause(&id) {
+                fanout.replace(&id, None);
+            }
+        }
+        ControlMessage::Replace(id, Some(sink)) => {
+            if let Err(sink) = send_group.replace(&id, sink) {
+                fanout.replace(&id, Some(sink));
+            }
+        }
+    }
+}
+
 #[pin_project]
 struct SendGroup {
     #[pin]
-    sends: Vec<(ComponentKey, SendOp)>,
+    sends: IndexMap<ComponentKey, SendOp>,
     waker: Arc<AtomicWaker>,
 }
 
 impl SendGroup {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            sends: Vec::with_capacity(capacity),
+            sends: IndexMap::with_capacity(capacity),
             waker: Arc::new(AtomicWaker::new()),
         }
     }
 
     fn push(&mut self, id: ComponentKey, sink: BufferSender<Event>, input: Vec<Event>) {
         let send = SendOp::new(sink, input, Arc::clone(&self.waker));
-        self.sends.push((id, send));
+        self.sends.insert(id, send);
     }
 
-    fn remove(&mut self, id: &ComponentKey) {
-        if let Some(i) = self.sends.iter().position(|(n, _)| n == id) {
-            let (_id, _removed) = self.sends.remove(i);
-        } else {
-            panic!("Tried to remove a sink that's not present");
-        }
+    fn contains(&mut self, id: &ComponentKey) -> bool {
+        self.sends.contains_key(id)
     }
 
-    fn replace(&mut self, id: &ComponentKey, sink: BufferSender<Event>) {
-        if let Some((_, send)) = self.sends.iter_mut().find(|(n, _)| n == id) {
+    fn remove(&mut self, id: &ComponentKey) -> bool {
+        self.sends.remove(id).is_some()
+    }
+
+    fn replace(
+        &mut self,
+        id: &ComponentKey,
+        sink: BufferSender<Event>,
+    ) -> Result<(), BufferSender<Event>> {
+        if let Some(send) = self.sends.get_mut(id) {
             send.replace(sink);
             // This may have unpaused a send operation, so make sure it is woken up.
             self.waker.wake();
+            Ok(())
         } else {
-            panic!("Tried to replace a sink that's not already present");
+            Err(sink)
         }
     }
 
-    fn pause(&mut self, id: &ComponentKey) {
-        if let Some((_, send)) = self.sends.iter_mut().find(|(n, _)| n == id) {
+    fn pause(&mut self, id: &ComponentKey) -> bool {
+        if let Some(send) = self.sends.get_mut(id) {
             send.pause();
+            true
         } else {
-            panic!("Tried to pause a sink that's not already present");
+            false
         }
     }
 }
