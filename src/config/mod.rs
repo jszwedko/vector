@@ -106,7 +106,7 @@ pub struct Config {
     pub healthchecks: HealthcheckOptions,
     pub sources: IndexMap<ComponentKey, SourceOuter>,
     pub sinks: IndexMap<ComponentKey, SinkOuter<OutputId>>,
-    pub transforms: IndexMap<ComponentKey, TransformOuter<OutputId>>,
+    pub(super) transforms: IndexMap<ComponentKey, TransformOuter<OutputId>>,
     pub enrichment_tables: IndexMap<ComponentKey, EnrichmentTableOuter>,
     tests: Vec<TestDefinition>,
     expansions: IndexMap<ComponentKey, Vec<ComponentKey>>,
