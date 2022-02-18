@@ -2,7 +2,7 @@ use metrics::counter;
 use vector_core::internal_event::InternalEvent;
 
 #[derive(Debug)]
-pub struct AwsSqsEventSent<'a> {
+pub(crate) struct AwsSqsEventSent<'a> {
     pub(crate) byte_size: usize,
     pub(crate) message_id: Option<&'a String>,
 }
