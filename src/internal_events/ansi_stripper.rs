@@ -4,7 +4,7 @@ use vector_core::internal_event::InternalEvent;
 
 #[derive(Debug)]
 pub struct AnsiStripperFieldMissingError<'a> {
-    pub field: &'a str,
+    pub(crate) field: &'a str,
 }
 
 impl InternalEvent for AnsiStripperFieldMissingError<'_> {
