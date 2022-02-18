@@ -631,7 +631,7 @@ impl Display for Resource {
 
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct TestDefinition<T = OutputId> {
+pub(crate) struct TestDefinition<T = OutputId> {
     pub name: String,
     pub input: Option<TestInput>,
     #[serde(default)]
