@@ -5,7 +5,7 @@ use metrics::counter;
 use vector_core::internal_event::InternalEvent;
 
 #[derive(Debug)]
-pub struct StatsdInvalidRecord<'a> {
+pub(crate) struct StatsdInvalidRecord<'a> {
     pub(crate) error: &'a crate::sources::statsd::parser::ParseError,
     pub bytes: Bytes,
 }
