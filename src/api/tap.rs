@@ -41,7 +41,7 @@ impl GlobMatcher<&str> for String {
 
 /// A tap notification signals whether a pattern matches a component.
 #[derive(Debug)]
-pub enum TapNotification {
+pub(crate) enum TapNotification {
     Matched,
     NotMatched,
 }
