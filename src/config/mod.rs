@@ -268,7 +268,7 @@ pub struct SinkOuter<T> {
     proxy: ProxyConfig,
 
     #[serde(flatten)]
-    pub inner: Box<dyn SinkConfig>,
+    pub(super) inner: Box<dyn SinkConfig>,
 }
 
 impl<T> SinkOuter<T> {
