@@ -519,7 +519,7 @@ pub type TransformDescription = ComponentDescription<Box<dyn TransformConfig>>;
 inventory::collect!(TransformDescription);
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct EnrichmentTableOuter {
+pub(super) struct EnrichmentTableOuter {
     #[serde(flatten)]
     pub(crate) inner: Box<dyn EnrichmentTableConfig>,
 }
